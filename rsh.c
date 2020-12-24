@@ -11,6 +11,8 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <stdbool.h>
+#include <fcntl.h>
+#include "rsh.h"
 
 #define BUFSIZE 128
 
@@ -71,11 +73,55 @@ int ChangeDir(char *args[])
 	return status;
 }
 
+// Checks for redirection. Replaces redirection arg with NULL and places index
+// of file to redirect to in arg. Returns redirection type.
+Redirection CheckRedirection(char *args[], int *arg)
+{
+	for (int i=0; args[i]; i++) {
+		for (int j=0; redirectionTable[j]; j++) {
+			if (!strcmp(args[i], redirectionTable[j])) {
+				args[i] = NULL;
+				*arg = i+1;
+				return j;
+			}
+		}
+	}
+	return NONE;
+}
+
+// Redirect input to path.
+int RedirectIn(char *path) {
+	close(0);
+	return open(path, O_RDONLY);
+}
+
+// Redirect output to path for writing or appending.
+int RedirectOut(char *path, bool append) {
+	int mode = O_CREAT|O_WRONLY;
+	if (append) {
+		mode |= O_APPEND;
+	}
+	close(1);
+	return open(path, mode, 0644);
+}
+
+// perfrom any redirections and fromat args as necessary
+void DoRedirects(char *args[])
+{
+	int index;
+	switch(CheckRedirection(args, &index)) {
+		case INPUT: RedirectIn(args[index]); break;
+		case OUTPUT: RedirectOut(args[index], false); break;
+		case APPEND: RedirectOut(args[index], true); break;
+		default: break;
+	}
+}
+
 int main() {
 	char line[BUFSIZE];
 	char *args[16];
-	int pid, status;
 	char *str;
+	int status;
 
 	while (true) {
 		str = Prompt(line, BUFSIZE);
@@ -95,10 +141,11 @@ int main() {
 		// change image
 		else {
 			if (fork()) { // parent
-				pid = wait(&status);
+				wait(&status);
 				printf("exit status: %d\n", status);
 			}
 			else { // child
+				DoRedirects(args);
 				ChangeImage(getenv("PATH"), args);
 				printf("Couldn't find %s\n", args[0]);
 				exit(1);
