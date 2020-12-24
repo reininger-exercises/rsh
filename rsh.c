@@ -1,12 +1,20 @@
+/* Reid Reininger
+ * charles.reininger@wsu.edu
+ * 
+ * Reid's sh (rsh). This is a shell program to execute commands on a linux
+ * system.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <stdbool.h>
 
 #define BUFSIZE 128
 
-char prompt[] = "rsh%: "; // user prompt
+char prompt[] = "\x1B[34mrsh%\x1B[0m "; // user prompt
 
 // Prompts the user for a command. Returns NULL if EOF without any chars.
 char *Prompt(char *buf, int size)
@@ -51,23 +59,50 @@ int ChangeImage(char *path, char *args[])
 	return -1;
 }
 
+int ChangeDir(char *args[])
+{
+	char *path;
+	int status;
+	path = args[1] ? args[1] : getenv("HOME");
+	status = chdir(path);
+	if (status) {
+		printf("Could not find %s", path);
+	}
+	return status;
+}
+
 int main() {
 	char line[BUFSIZE];
 	char *args[16];
-	char *path = getenv("PATH");
 	int pid, status;
+	char *str;
 
-	while (Prompt(line, BUFSIZE) && strcmp("exit", line)) {
+	while (true) {
+		str = Prompt(line, BUFSIZE);
 		ParseLine(line, args);
 
-		if (fork()) { // parent
-			pid = wait(&status);
-			printf("exit status: %d\n", status);
+		// change directory
+		if (!strcmp(args[0], "cd")) {
+			ChangeDir(args);
 		}
-		else { // child
-			ChangeImage(path, args);
-			printf("Couldn't find %s\n", args[0]);
-			exit(1);
+
+		// exit
+		else if (!str || !strcmp(args[0], "exit")) {
+			putchar('\n');
+			exit(0);
+		}
+
+		// change image
+		else {
+			if (fork()) { // parent
+				pid = wait(&status);
+				printf("exit status: %d\n", status);
+			}
+			else { // child
+				ChangeImage(getenv("PATH"), args);
+				printf("Couldn't find %s\n", args[0]);
+				exit(1);
+			}
 		}
 	}
 }
