@@ -2,7 +2,7 @@
  * charles.reininger@wsu.edu
  * 
  * Reid's sh (rsh). This is a shell program to execute commands on a linux
- * system.
+ * system. Supports pipes and IO redirection.
  */
 
 #include <stdio.h>
@@ -12,27 +12,30 @@
 #include <sys/wait.h>
 #include <stdbool.h>
 #include <fcntl.h>
-#include "rsh.h"
 
 #define BUFSIZE 128
 
-char prompt[] = "\x1B[34mrsh%\x1B[0m "; // user prompt
+// IO redirection types
+typedef enum redirection {
+	INPUT, OUTPUT, APPEND, NONE
+} Redirection;
 
-// Prompts the user for a command. Returns NULL if EOF without any chars.
+// Table of redirection symbols in commands
+const char *redirectionTable[] = {"<", ">", ">>", NULL};
+
+// Command prompt
+char prompt[] = "\x1B[34mrsh%\x1B[0m "; 
+
+// Prompts the user for a command. Returns pointer to buf or NULL if EOF.
 char *Prompt(char *buf, int size)
 {
-	char *str;
-
-	// display prompt
 	printf("%s", prompt);
-
-	// read line
-	str = fgets(buf, size, stdin);
-	buf[strlen(buf)-1] = 0;
-	return str;
+	char *line = fgets(buf, size, stdin);
+	buf[strlen(buf)-1] = '\0'; // remove newline
+	return line;
 }
 
-// parse line into command and args. args is null terminated.
+// Tokenize line into null terminated list placed in args.
 void ParseLine(char *line, char* args[])
 {
 	char *token = strtok(line, " ");
@@ -43,8 +46,19 @@ void ParseLine(char *line, char* args[])
 	}
 }
 
-// Change executtion image with args. Searches all directories in path for
-// command.
+// Change the current working directory.
+int ChangeDir(char *args[])
+{
+	char *path = args[1] ? args[1] : getenv("HOME");
+	int status = chdir(path);
+	if (status) {
+		printf("Could not find %s", path);
+	}
+	return status;
+}
+
+// Change execution image. Command should be first element of args. Searches all directories in path
+// delimited by ":" for command. Return -1 if command could not be found.
 int ChangeImage(char *path, char *args[])
 {
 	char command[128];
@@ -61,27 +75,16 @@ int ChangeImage(char *path, char *args[])
 	return -1;
 }
 
-int ChangeDir(char *args[])
-{
-	char *path;
-	int status;
-	path = args[1] ? args[1] : getenv("HOME");
-	status = chdir(path);
-	if (status) {
-		printf("Could not find %s", path);
-	}
-	return status;
-}
 
-// Checks for redirection. Replaces redirection arg with NULL and places index
-// of file to redirect to in arg. Returns redirection type.
-Redirection CheckRedirection(char *args[], int *arg)
+// Check command for redirection. Redirection type is returned. Redirection
+// symbol is replaced with NULL and path to file is placed in path.
+Redirection CheckRedirection(char *args[], int *path)
 {
 	for (int i=0; args[i]; i++) {
 		for (int j=0; redirectionTable[j]; j++) {
 			if (!strcmp(args[i], redirectionTable[j])) {
 				args[i] = NULL;
-				*arg = i+1;
+				*path = i+1;
 				return j;
 			}
 		}
@@ -89,13 +92,14 @@ Redirection CheckRedirection(char *args[], int *arg)
 	return NONE;
 }
 
-// Redirect input to path.
+// Redirect input to path. Return -1 if could not open file.
 int RedirectIn(char *path) {
 	close(0);
 	return open(path, O_RDONLY);
 }
 
-// Redirect output to path for writing or appending.
+// Redirect output to path for writing or appending. Return -1 if could not
+// open file.
 int RedirectOut(char *path, bool append) {
 	int mode = O_CREAT|O_WRONLY;
 	if (append) {
@@ -105,16 +109,71 @@ int RedirectOut(char *path, bool append) {
 	return open(path, mode, 0644);
 }
 
-// perfrom any redirections and fromat args as necessary
-void DoRedirects(char *args[])
+// Split args so args points to head command and returns pointer to tail
+// command. Commands are delimited by "|".
+char **Split(char *args[])
 {
-	int index;
-	switch(CheckRedirection(args, &index)) {
-		case INPUT: RedirectIn(args[index]); break;
-		case OUTPUT: RedirectOut(args[index], false); break;
-		case APPEND: RedirectOut(args[index], true); break;
+	for (int i=0; args[i]; i++) {
+		if (!strcmp(args[i], "|")) {
+			args[i] = NULL;
+			return &args[i+1];
+		}
+	}
+	return NULL;
+}
+
+// Perform IO redirections.
+void DoRedirection(char *args[])
+{
+	int tail;
+	switch(CheckRedirection(args, &tail)) {
+		case INPUT: RedirectIn(args[tail]); break;
+		case OUTPUT: RedirectOut(args[tail], false); break;
+		case APPEND: RedirectOut(args[tail], true); break;
 		default: break;
 	}
+}
+
+// Create a pipe to replace stdin and stdout. Returns 1 for the writer process, 0 for the reader.
+int CreatePipe()
+{
+	int pd[2];
+	pipe(pd);
+
+	if (fork()) { // writer
+		close(pd[0]);
+		dup2(pd[1], 1);
+		close(pd[1]);
+		return 1;
+	}
+	else { // reader
+		close(pd[1]);
+		dup2(pd[0], 0);
+		close(pd[0]);
+		return 0;
+	}
+}
+
+int DoCommand(char *args[])
+{
+	char **head = args;
+	char **tail = Split(args);
+
+	if (!tail) { // base case, execute single command
+		DoRedirection(head);
+		ChangeImage(getenv("PATH"), head); // only returns on error
+		printf("Couldn't find %s\n", head[0]);
+		exit(1);
+	}
+
+	// recursive case
+	if (CreatePipe()) { // writer
+		DoCommand(head);
+	}
+	else { // reader
+		DoCommand(tail);
+	}
+	
 }
 
 int main() {
@@ -134,7 +193,7 @@ int main() {
 
 		// exit
 		else if (!str || !strcmp(args[0], "exit")) {
-			putchar('\n');
+			if (!str) putchar('\n');
 			exit(0);
 		}
 
@@ -145,11 +204,9 @@ int main() {
 				printf("exit status: %d\n", status);
 			}
 			else { // child
-				DoRedirects(args);
-				ChangeImage(getenv("PATH"), args);
-				printf("Couldn't find %s\n", args[0]);
-				exit(1);
+				DoCommand(args);
 			}
 		}
 	}
 }
+
